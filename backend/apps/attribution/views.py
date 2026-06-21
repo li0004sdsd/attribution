@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.models import get_user_role, get_allowed_models, ROLE_ADMIN, ROLE_OPERATOR, ROLE_USER
 from apps.journeys.models import ConversionPath
 from apps.channels.models import AdChannel
 from .engine import MODELS
@@ -16,6 +17,13 @@ class RunAttributionView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         model_type = serializer.validated_data['model_type']
+        allowed = get_allowed_models(request.user)
+        if allowed is not None and model_type not in allowed:
+            return Response(
+                {'detail': f'You are not allowed to run attribution model "{model_type}"'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         paths = ConversionPath.objects.prefetch_related('touchpoints').filter(converted=True)
 
         if model_type == 'custom_weight':
@@ -28,7 +36,7 @@ class RunAttributionView(APIView):
         else:
             credits = MODELS[model_type](paths)
 
-        AttributionResult.objects.filter(model_type=model_type).delete()
+        AttributionResult.objects.filter(model_type=model_type, created_by=request.user).delete()
 
         results = []
         for channel_id, credit in credits.items():
@@ -37,6 +45,7 @@ class RunAttributionView(APIView):
                 model_type=model_type,
                 channel=channel,
                 credit=credit,
+                created_by=request.user,
             )
             results.append(result)
 
@@ -47,7 +56,19 @@ class AttributionResultViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AttributionResultSerializer
 
     def get_queryset(self):
-        qs = AttributionResult.objects.select_related('channel').all()
+        user = self.request.user
+        role = get_user_role(user)
+        qs = AttributionResult.objects.select_related('channel')
+
+        if role == ROLE_ADMIN:
+            pass
+        elif role == ROLE_OPERATOR:
+            allowed = get_allowed_models(user)
+            if allowed is not None:
+                qs = qs.filter(model_type__in=allowed)
+        else:
+            qs = qs.filter(created_by=user)
+
         model_type = self.request.query_params.get('model_type')
         if model_type:
             qs = qs.filter(model_type=model_type)

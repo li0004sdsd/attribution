@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.auth.models import User
 from apps.channels.models import AdChannel
 
 
@@ -14,6 +15,13 @@ class AttributionResult(models.Model):
     channel = models.ForeignKey(AdChannel, on_delete=models.CASCADE, related_name='attribution_results')
     credit = models.DecimalField(max_digits=14, decimal_places=4)
     calculated_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='attribution_results',
+    )
 
     class Meta:
         ordering = ['-calculated_at', '-credit']
