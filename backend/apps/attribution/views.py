@@ -17,7 +17,16 @@ class RunAttributionView(APIView):
 
         model_type = serializer.validated_data['model_type']
         paths = ConversionPath.objects.prefetch_related('touchpoints').filter(converted=True)
-        credits = MODELS[model_type](paths)
+
+        if model_type == 'custom_weight':
+            weights = {
+                'first_touch': serializer.validated_data.get('first_touch_weight'),
+                'middle_touch': serializer.validated_data.get('middle_touch_weight'),
+                'last_touch': serializer.validated_data.get('last_touch_weight'),
+            }
+            credits = MODELS[model_type](paths, weights=weights)
+        else:
+            credits = MODELS[model_type](paths)
 
         AttributionResult.objects.filter(model_type=model_type).delete()
 

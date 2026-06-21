@@ -9,6 +9,7 @@ const MODELS = [
   { key: 'first_touch', label: 'First Touch' },
   { key: 'last_touch', label: 'Last Touch' },
   { key: 'linear', label: 'Linear' },
+  { key: 'custom_weight', label: 'Custom Weight' },
 ];
 
 const COLORS = ['#e94560', '#0f3460', '#533483', '#16213e', '#4ade80', '#f87171', '#a0c4ff', '#fbbf24'];
@@ -18,6 +19,10 @@ export default function AttributionPage() {
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [firstWeight, setFirstWeight] = useState(0.3);
+  const [middleWeight, setMiddleWeight] = useState(0.4);
+  const [lastWeight, setLastWeight] = useState(0.3);
+  const [weightError, setWeightError] = useState('');
 
   const loadResults = (model) => {
     setLoading(true);
@@ -30,11 +35,32 @@ export default function AttributionPage() {
   useEffect(() => { loadResults(activeModel); }, [activeModel]);
 
   const handleRun = async () => {
+    setWeightError('');
+    let weights = null;
+    if (activeModel === 'custom_weight') {
+      const f = parseFloat(firstWeight);
+      const m = parseFloat(middleWeight);
+      const l = parseFloat(lastWeight);
+      if (isNaN(f) || isNaN(m) || isNaN(l) || f < 0 || m < 0 || l < 0) {
+        setWeightError('Please enter valid non-negative numbers for all weights');
+        return;
+      }
+      const sum = f + m + l;
+      if (Math.abs(sum - 1) > 0.0001) {
+        setWeightError(`Sum of weights must equal 1 (current sum: ${sum.toFixed(4)})`);
+        return;
+      }
+      weights = { first_touch: f, middle_touch: m, last_touch: l };
+    }
     setRunning(true);
     try {
-      const { data } = await runAttribution(activeModel);
+      const { data } = await runAttribution(activeModel, weights);
       setResults(data.results || data);
-    } catch {
+    } catch (err) {
+      const msg = err?.response?.data;
+      if (typeof msg === 'object') {
+        setWeightError(Object.values(msg).flat().join(', '));
+      }
     } finally {
       setRunning(false);
     }
@@ -69,6 +95,58 @@ export default function AttributionPage() {
           {running ? 'Calculating...' : 'Run Attribution'}
         </button>
       </div>
+
+      {activeModel === 'custom_weight' && (
+        <div style={styles.weightPanel}>
+          <h3 style={styles.weightTitle}>Configure Weights (sum must equal 1)</h3>
+          <div style={styles.weightRow}>
+            <div style={styles.weightField}>
+              <label style={styles.weightLabel}>First Touch</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0"
+                max="1"
+                value={firstWeight}
+                onChange={(e) => setFirstWeight(e.target.value)}
+                style={styles.weightInput}
+              />
+            </div>
+            <div style={styles.weightField}>
+              <label style={styles.weightLabel}>Middle Touch</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0"
+                max="1"
+                value={middleWeight}
+                onChange={(e) => setMiddleWeight(e.target.value)}
+                style={styles.weightInput}
+              />
+            </div>
+            <div style={styles.weightField}>
+              <label style={styles.weightLabel}>Last Touch</label>
+              <input
+                type="number"
+                step="0.05"
+                min="0"
+                max="1"
+                value={lastWeight}
+                onChange={(e) => setLastWeight(e.target.value)}
+                style={styles.weightInput}
+              />
+            </div>
+          </div>
+          <div style={styles.weightSum}>
+            Sum: <span style={{
+              color: Math.abs((parseFloat(firstWeight) || 0) + (parseFloat(middleWeight) || 0) + (parseFloat(lastWeight) || 0) - 1) <= 0.0001 ? '#4ade80' : '#f87171'
+            }}>
+              {((parseFloat(firstWeight) || 0) + (parseFloat(middleWeight) || 0) + (parseFloat(lastWeight) || 0)).toFixed(4)}
+            </span>
+          </div>
+          {weightError && <div style={styles.weightError}>{weightError}</div>}
+        </div>
+      )}
 
       {loading ? (
         <div style={styles.loading}>Loading results...</div>
@@ -150,6 +228,20 @@ const styles = {
   header: { marginBottom: 24 },
   heading: { color: '#e0e0f0', margin: 0 },
   controls: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  weightPanel: {
+    background: '#16213e', borderRadius: 10, padding: 20, marginBottom: 24,
+    border: '1px solid #2a2a4a',
+  },
+  weightTitle: { color: '#e0e0f0', marginTop: 0, marginBottom: 16, fontSize: 14 },
+  weightRow: { display: 'flex', gap: 16, marginBottom: 12 },
+  weightField: { flex: 1, display: 'flex', flexDirection: 'column', gap: 6 },
+  weightLabel: { color: '#a0a8c0', fontSize: 12, fontWeight: 500 },
+  weightInput: {
+    background: '#0f0f23', border: '1px solid #2a2a4a', borderRadius: 6,
+    color: '#e0e0f0', padding: '8px 12px', fontSize: 14, outline: 'none',
+  },
+  weightSum: { color: '#a0a8c0', fontSize: 13, marginBottom: 8 },
+  weightError: { color: '#f87171', fontSize: 13, marginTop: 8 },
   modelTabs: { display: 'flex', gap: 4, background: '#16213e', padding: 4, borderRadius: 8 },
   tab: {
     background: 'transparent', border: 'none', color: '#a0a8c0',

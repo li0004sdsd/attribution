@@ -7,6 +7,7 @@ class AttributionResult(models.Model):
         ('first_touch', 'First Touch'),
         ('last_touch', 'Last Touch'),
         ('linear', 'Linear'),
+        ('custom_weight', 'Custom Weight'),
     ]
 
     model_type = models.CharField(max_length=50, choices=MODEL_CHOICES)
