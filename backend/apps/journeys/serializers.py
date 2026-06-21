@@ -35,6 +35,11 @@ class BulkImportSerializer(serializers.Serializer):
     def create(self, validated_data):
         from apps.channels.models import AdChannel
         tps_data = validated_data.pop('touchpoints')
+
+        existing = ConversionPath.objects.filter(user_id=validated_data['user_id']).first()
+        if existing is not None:
+            return existing, False
+
         path = ConversionPath.objects.create(**validated_data)
         for tp in tps_data:
             channel = AdChannel.objects.get(pk=tp['channel'])
@@ -44,4 +49,4 @@ class BulkImportSerializer(serializers.Serializer):
                 timestamp=tp['timestamp'],
                 position=tp['position'],
             )
-        return path
+        return path, True

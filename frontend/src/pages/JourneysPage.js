@@ -10,6 +10,7 @@ export default function JourneysPage() {
   const [form, setForm] = useState({ user_id: '', converted: false, conversion_value: '', touchpoints: [] });
   const [newTp, setNewTp] = useState({ channel: '', timestamp: '', position: 1 });
   const [error, setError] = useState('');
+  const [skippedMsg, setSkippedMsg] = useState('');
 
   const load = () =>
     Promise.all([listPaths(), listChannels()]).then(([p, c]) => {
@@ -30,8 +31,12 @@ export default function JourneysPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setSkippedMsg('');
     try {
-      await bulkImport({ ...form, conversion_value: parseFloat(form.conversion_value) || 0 });
+      const res = await bulkImport({ ...form, conversion_value: parseFloat(form.conversion_value) || 0 });
+      if (res.data && res.data.skipped) {
+        setSkippedMsg(`Path for user "${form.user_id}" already exists — skipped.`);
+      }
       setForm({ user_id: '', converted: false, conversion_value: '', touchpoints: [] });
       setShowForm(false);
       load();
@@ -54,6 +59,8 @@ export default function JourneysPage() {
         <h1 style={styles.heading}>Conversion Paths</h1>
         <button style={styles.addBtn} onClick={() => setShowForm(!showForm)}>+ Add Path</button>
       </div>
+
+      {skippedMsg && <div style={styles.skippedBanner}>{skippedMsg}</div>}
 
       {showForm && (
         <div style={styles.formCard}>
@@ -85,6 +92,7 @@ export default function JourneysPage() {
               </div>
             </div>
             {error && <div style={styles.error}>{error}</div>}
+            {skippedMsg && <div style={styles.skipped}>{skippedMsg}</div>}
             <div style={styles.formActions}>
               <button style={styles.saveBtn} type="submit">Save Path</button>
               <button style={styles.cancelBtn} type="button" onClick={() => setShowForm(false)}>Cancel</button>
@@ -150,6 +158,8 @@ const styles = {
   tpAdd: { display: 'flex', gap: 8, flexWrap: 'wrap' },
   addTpBtn: { background: '#0f3460', color: '#a0c4ff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13 },
   error: { color: '#e94560', fontSize: 13 },
+  skipped: { color: '#fbbf24', fontSize: 13 },
+  skippedBanner: { background: '#16213e', border: '1px solid #fbbf24', borderRadius: 8, padding: '10px 16px', color: '#fbbf24', fontSize: 13, marginBottom: 16 },
   formActions: { display: 'flex', gap: 12 },
   saveBtn: { background: '#e94560', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 24px', cursor: 'pointer', fontWeight: 600 },
   cancelBtn: { background: 'transparent', border: '1px solid #2a2a4a', color: '#a0a8c0', borderRadius: 8, padding: '10px 24px', cursor: 'pointer' },

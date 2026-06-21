@@ -15,6 +15,10 @@ class BulkImportView(APIView):
     def post(self, request):
         serializer = BulkImportSerializer(data=request.data)
         if serializer.is_valid():
-            path = serializer.save()
-            return Response(ConversionPathSerializer(path).data, status=status.HTTP_201_CREATED)
+            path, created = serializer.save()
+            data = ConversionPathSerializer(path).data
+            data['skipped'] = not created
+            if created:
+                return Response(data, status=status.HTTP_201_CREATED)
+            return Response(data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

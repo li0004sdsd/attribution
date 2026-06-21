@@ -3,7 +3,7 @@ from apps.channels.models import AdChannel
 
 
 class ConversionPath(models.Model):
-    user_id = models.CharField(max_length=200)
+    user_id = models.CharField(max_length=200, unique=True)
     converted = models.BooleanField(default=False)
     conversion_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
