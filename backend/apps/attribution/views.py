@@ -38,16 +38,21 @@ class RunAttributionView(APIView):
 
         AttributionResult.objects.filter(model_type=model_type, created_by=request.user).delete()
 
-        results = []
-        for channel_id, credit in credits.items():
-            channel = AdChannel.objects.get(pk=channel_id)
-            result = AttributionResult.objects.create(
+        channel_ids = list(credits.keys())
+        channel_map = {ch.pk: ch for ch in AdChannel.objects.filter(pk__in=channel_ids)}
+
+        result_objs = [
+            AttributionResult(
                 model_type=model_type,
-                channel=channel,
+                channel=channel_map[channel_id],
                 credit=credit,
                 created_by=request.user,
             )
-            results.append(result)
+            for channel_id, credit in credits.items()
+            if channel_id in channel_map
+        ]
+        AttributionResult.objects.bulk_create(result_objs)
+        results = sorted(result_objs, key=lambda r: -r.credit)
 
         return Response(AttributionResultSerializer(results, many=True).data, status=status.HTTP_200_OK)
 
