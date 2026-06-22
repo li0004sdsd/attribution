@@ -21,22 +21,45 @@ def _almost_equal(a, b, eps=Decimal('0.0001')):
     return abs(Decimal(str(a)) - Decimal(str(b))) <= eps
 
 
-def _make_path(user_id, converted, conversion_value, channels, now=None):
+def _make_path(user_id, converted, conversion_value, channels, now=None, conversion_time=None, touchpoint_timestamps=None):
     """Helper: create a ConversionPath + ordered TouchPoints for a list of channel pks.
-    Returns the ConversionPath instance.
+
+    Args:
+        user_id: unique user identifier
+        converted: whether the path converted
+        conversion_value: monetary value of the conversion
+        channels: list of channel primary keys (touchpoint order)
+        now: DEPRECATED, use conversion_time instead
+        conversion_time: datetime when conversion occurred (default: timezone.now())
+        touchpoint_timestamps: optional list of datetimes for each touchpoint.
+            If provided, length must match channels. If None, all touchpoints
+            get conversion_time - 1 day.
+
+    Returns:
+        ConversionPath instance
     """
-    if now is None:
-        now = timezone.now()
+    if conversion_time is None:
+        if now is not None:
+            conversion_time = now
+        else:
+            conversion_time = timezone.now()
+
     path = ConversionPath.objects.create(
         user_id=user_id,
         converted=converted,
         conversion_value=conversion_value,
+        conversion_time=conversion_time,
     )
+
     for i, ch_pk in enumerate(channels, start=1):
+        if touchpoint_timestamps is not None:
+            tp_time = touchpoint_timestamps[i - 1]
+        else:
+            tp_time = conversion_time - timezone.timedelta(days=1)
         TouchPoint.objects.create(
             path=path,
             channel_id=ch_pk,
-            timestamp=now,
+            timestamp=tp_time,
             position=i,
         )
     return path
@@ -575,3 +598,340 @@ class AttributionTaskFailureTestCase(TransactionTestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, AttributionTask.STATUS_SUCCESS,
                          f"Should succeed with partial weights, got: {task.error_message}")
+
+
+# =========================================================================
+# ATTRIBUTION WINDOW TESTS
+# =========================================================================
+
+
+class AttributionWindowFilterTestCase(TestCase):
+    """Tests for attribution window filtering in engine functions."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.ch_short = AdChannel.objects.create(
+            name='Short-Window Channel',
+            platform='google',
+            attribution_window_days=7,
+        )
+        cls.ch_long = AdChannel.objects.create(
+            name='Long-Window Channel',
+            platform='facebook',
+            attribution_window_days=60,
+        )
+        cls.ch_default = AdChannel.objects.create(
+            name='Default-Window Channel',
+            platform='email',
+            # default is 30 days
+        )
+
+    def test_default_window_is_30_days(self):
+        ch = AdChannel.objects.create(name='Test Ch', platform='tiktok')
+        self.assertEqual(ch.attribution_window_days, 30,
+                         "Default attribution window should be 30 days")
+
+    def test_touchpoint_in_window_kept(self):
+        """Touchpoint within window should be kept."""
+        conversion_time = timezone.now()
+        tp_time = conversion_time - timezone.timedelta(days=5)
+        path = _make_path(
+            'win_u1', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_time],
+        )
+        result = first_touch([path])
+        self.assertIn(self.ch_short.pk, result)
+        self.assertTrue(_almost_equal(result[self.ch_short.pk], '100.00'))
+
+    def test_touchpoint_outside_window_excluded(self):
+        """Touchpoint outside window should be excluded."""
+        conversion_time = timezone.now()
+        tp_time = conversion_time - timezone.timedelta(days=30)  # > 7 days
+        path = _make_path(
+            'win_u2', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_time],
+        )
+        result = first_touch([path])
+        self.assertEqual(len(result), 0,
+                         "Touchpoint 30 days ago should be excluded from 7-day window")
+
+    def test_touchpoint_on_window_boundary_kept(self):
+        """Touchpoint exactly on the window boundary (days == window) should be kept."""
+        conversion_time = timezone.now()
+        tp_time = conversion_time - timezone.timedelta(days=7)  # exactly 7 days
+        path = _make_path(
+            'win_u3', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_time],
+        )
+        result = first_touch([path])
+        self.assertIn(self.ch_short.pk, result)
+        self.assertTrue(_almost_equal(result[self.ch_short.pk], '100.00'))
+
+    def test_touchpoint_after_conversion_excluded(self):
+        """Touchpoint timestamp after conversion_time should be excluded."""
+        conversion_time = timezone.now()
+        tp_time = conversion_time + timezone.timedelta(days=1)  # future
+        path = _make_path(
+            'win_u4', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_time],
+        )
+        result = first_touch([path])
+        self.assertEqual(len(result), 0,
+                         "Future touchpoints should be excluded")
+
+    def test_mixed_windows_first_touch(self):
+        """Channels with different windows: first valid touchpoint gets credit.
+
+        Path: ch_short (30d ago, outside 7d) → ch_long (10d ago, inside 60d) → ch_default (1d ago)
+        Conversion value: 100
+        Expected first_touch: ch_long gets all 100 (first valid touch)
+        """
+        conversion_time = timezone.now()
+        timestamps = [
+            conversion_time - timezone.timedelta(days=30),
+            conversion_time - timezone.timedelta(days=10),
+            conversion_time - timezone.timedelta(days=1),
+        ]
+        path = _make_path(
+            'win_u5', True, '100.00',
+            [self.ch_short.pk, self.ch_long.pk, self.ch_default.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=timestamps,
+        )
+        result = first_touch([path])
+        self.assertNotIn(self.ch_short.pk, result,
+                         "ch_short touch (30d ago) should be excluded from 7d window")
+        self.assertIn(self.ch_long.pk, result)
+        self.assertTrue(_almost_equal(result[self.ch_long.pk], '100.00'),
+                        "ch_long (10d ago) is first valid, should get all credit")
+
+    def test_mixed_windows_last_touch(self):
+        """Channels with different windows: last valid touchpoint gets credit."""
+        conversion_time = timezone.now()
+        timestamps = [
+            conversion_time - timezone.timedelta(days=5),   # ch_short: 5d in window
+            conversion_time - timezone.timedelta(days=45),  # ch_long: 45d in 60d window
+            conversion_time - timezone.timedelta(days=60),  # ch_default: 60d > 30d, OUT
+        ]
+        path = _make_path(
+            'win_u6', True, '100.00',
+            [self.ch_short.pk, self.ch_long.pk, self.ch_default.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=timestamps,
+        )
+        result = last_touch([path])
+        self.assertIn(self.ch_long.pk, result)
+        self.assertTrue(_almost_equal(result[self.ch_long.pk], '100.00'),
+                        "ch_long (45d ago) is last valid, should get all credit")
+
+    def test_mixed_windows_linear(self):
+        """Linear model splits value only among in-window touchpoints.
+
+        Path: ch_short (5d ago) → ch_long (45d ago) → ch_default (60d ago, OUT)
+        Valid: ch_short and ch_long (2 touchpoints)
+        Each gets 100 / 2 = 50
+        """
+        conversion_time = timezone.now()
+        timestamps = [
+            conversion_time - timezone.timedelta(days=5),
+            conversion_time - timezone.timedelta(days=45),
+            conversion_time - timezone.timedelta(days=60),
+        ]
+        path = _make_path(
+            'win_u7', True, '100.00',
+            [self.ch_short.pk, self.ch_long.pk, self.ch_default.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=timestamps,
+        )
+        result = linear([path])
+        self.assertEqual(len(result), 2, "Only 2 touchpoints are in window")
+        self.assertNotIn(self.ch_default.pk, result,
+                         "ch_default (60d ago) is outside 30d window")
+        self.assertTrue(_almost_equal(result[self.ch_short.pk], '50.00'),
+                        f"ch_short should get 50, got {result.get(self.ch_short.pk)}")
+        self.assertTrue(_almost_equal(result[self.ch_long.pk], '50.00'),
+                        f"ch_long should get 50, got {result.get(self.ch_long.pk)}")
+
+    def test_all_touchpoints_outside_window(self):
+        """If all touchpoints are outside window, no credit is assigned."""
+        conversion_time = timezone.now()
+        timestamps = [
+            conversion_time - timezone.timedelta(days=100),
+            conversion_time - timezone.timedelta(days=200),
+        ]
+        path = _make_path(
+            'win_u8', True, '100.00',
+            [self.ch_short.pk, self.ch_long.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=timestamps,
+        )
+        result = first_touch([path])
+        self.assertEqual(len(result), 0,
+                         "All touchpoints are outside their windows, no credit should be assigned")
+        result2 = last_touch([path])
+        self.assertEqual(len(result2), 0)
+        result3 = linear([path])
+        self.assertEqual(len(result3), 0)
+
+    def test_get_effective_conversion_time_fallback(self):
+        """get_effective_conversion_time should fall back to created_at if conversion_time is None.
+
+        Note: After migration, conversion_time should never be None, but the
+        fallback provides backward compatibility during the migration window.
+        """
+        conversion_time = timezone.now()
+        path = _make_path(
+            'win_u9', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[conversion_time - timezone.timedelta(days=3)],
+        )
+        # Manually simulate pre-migration state
+        path.conversion_time = None
+        self.assertEqual(path.get_effective_conversion_time(), path.created_at,
+                         "Should fall back to created_at when conversion_time is None")
+
+    def test_window_accuracy_with_dates(self):
+        """Test exact day boundary behavior with timedelta.days.
+
+        timedelta.days truncates towards zero, so:
+        - 7 days and 23 hours -> delta.days = 7 (kept for 7-day window)
+        - 8 days exactly      -> delta.days = 8 (excluded from 7-day window)
+        """
+        conversion_time = timezone.now()
+
+        # 7 days + 23 hours ago: timedelta(days=7)
+        tp_in = conversion_time - timezone.timedelta(days=7, hours=23)
+        # 8 days exactly: timedelta(days=8)
+        tp_out = conversion_time - timezone.timedelta(days=8)
+
+        path = _make_path(
+            'win_u10', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_in],
+        )
+        result = first_touch([path])
+        self.assertIn(self.ch_short.pk, result,
+                      "7 days + 23h should still be within 7-day window (delta.days = 7)")
+
+        path2 = _make_path(
+            'win_u11', True, '100.00',
+            [self.ch_short.pk],
+            conversion_time=conversion_time,
+            touchpoint_timestamps=[tp_out],
+        )
+        result2 = first_touch([path2])
+        self.assertNotIn(self.ch_short.pk, result2,
+                         "8 days exactly should be outside 7-day window (delta.days = 8)")
+
+
+class ChannelSerializerWindowValidationTestCase(TestCase):
+    """Tests for attribution window validation in channel serializer."""
+
+    def test_window_default_value(self):
+        from apps.channels.serializers import AdChannelSerializer
+        serializer = AdChannelSerializer(data={
+            'name': 'Test Ch',
+            'platform': 'google',
+            'cost_per_click': '1.00',
+            'active': True,
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        # Model default provides the value, so it may not be in validated_data.
+        # Verify by saving and checking the instance.
+        instance = serializer.save()
+        self.assertEqual(instance.attribution_window_days, 30)
+
+    def test_window_zero_rejected(self):
+        from apps.channels.serializers import AdChannelSerializer
+        serializer = AdChannelSerializer(data={
+            'name': 'Test Ch',
+            'platform': 'google',
+            'cost_per_click': '1.00',
+            'active': True,
+            'attribution_window_days': 0,
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('attribution_window_days', serializer.errors)
+
+    def test_window_negative_rejected(self):
+        from apps.channels.serializers import AdChannelSerializer
+        serializer = AdChannelSerializer(data={
+            'name': 'Test Ch',
+            'platform': 'google',
+            'cost_per_click': '1.00',
+            'active': True,
+            'attribution_window_days': -5,
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('attribution_window_days', serializer.errors)
+
+    def test_window_excessive_rejected(self):
+        from apps.channels.serializers import AdChannelSerializer
+        serializer = AdChannelSerializer(data={
+            'name': 'Test Ch',
+            'platform': 'google',
+            'cost_per_click': '1.00',
+            'active': True,
+            'attribution_window_days': 10000,
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('attribution_window_days', serializer.errors)
+
+    def test_window_valid_value_accepted(self):
+        from apps.channels.serializers import AdChannelSerializer
+        serializer = AdChannelSerializer(data={
+            'name': 'Test Ch',
+            'platform': 'google',
+            'cost_per_click': '1.00',
+            'active': True,
+            'attribution_window_days': 14,
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data['attribution_window_days'], 14)
+
+
+class ConversionTimeMigrationTestCase(TestCase):
+    """Tests for conversion_time backward compatibility."""
+
+    def test_get_effective_conversion_time_with_conversion_time(self):
+        ct = timezone.now() - timezone.timedelta(days=5)
+        path = _make_path(
+            'mig_u1', True, '100.00',
+            [],
+            conversion_time=ct,
+            touchpoint_timestamps=[],
+        )
+        self.assertEqual(path.get_effective_conversion_time(), ct)
+
+    def test_conversion_time_defaults_to_now(self):
+        before = timezone.now()
+        path = ConversionPath.objects.create(
+            user_id='mig_u2',
+            converted=True,
+            conversion_value='50.00',
+        )
+        after = timezone.now()
+        self.assertGreaterEqual(path.conversion_time, before)
+        self.assertLessEqual(path.conversion_time, after)
+
+    def test_adchannel_is_touchpoint_in_window(self):
+        ch = AdChannel.objects.create(name='W-Ch', platform='google', attribution_window_days=30)
+        conversion_time = timezone.now()
+
+        tp_in = conversion_time - timezone.timedelta(days=10)
+        tp_out = conversion_time - timezone.timedelta(days=60)
+        tp_future = conversion_time + timezone.timedelta(days=1)
+
+        self.assertTrue(ch.is_touchpoint_in_window(tp_in, conversion_time))
+        self.assertFalse(ch.is_touchpoint_in_window(tp_out, conversion_time))
+        self.assertFalse(ch.is_touchpoint_in_window(tp_future, conversion_time))

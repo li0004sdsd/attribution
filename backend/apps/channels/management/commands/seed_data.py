@@ -33,18 +33,22 @@ class Command(BaseCommand):
         if ConversionPath.objects.count() < 50:
             for i in range(80):
                 converted = random.random() > 0.3
+                now = timezone.now()
                 path = ConversionPath.objects.create(
                     user_id=f'user_{1000 + i}',
                     converted=converted,
                     conversion_value=round(random.uniform(50, 500), 2) if converted else 0,
+                    conversion_time=now,
                 )
                 num_touches = random.randint(1, 5)
                 selected = random.sample(channels, min(num_touches, len(channels)))
                 for pos, ch in enumerate(selected, 1):
+                    days_ago = random.randint(1, 60) if converted else random.randint(1, 10)
+                    tp_time = now - timezone.timedelta(days=days_ago)
                     TouchPoint.objects.create(
                         path=path,
                         channel=ch,
-                        timestamp=timezone.now(),
+                        timestamp=tp_time,
                         position=pos,
                     )
 

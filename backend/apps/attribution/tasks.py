@@ -124,7 +124,10 @@ def run_attribution_task(task_id):
 
         paths_qs = ConversionPath.objects.filter(
             converted=True
-        ).prefetch_related('touchpoints').order_by('pk')
+        ).prefetch_related(
+            'touchpoints',
+            'touchpoints__channel',
+        ).order_by('pk')
 
         total_count = paths_qs.count()
         task.update_progress(0, total_count)
