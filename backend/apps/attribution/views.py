@@ -1,13 +1,17 @@
+from django.db.models import Count
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.decorators import action
 
 from apps.accounts.models import get_user_role, get_allowed_models, ROLE_ADMIN, ROLE_OPERATOR, ROLE_USER
-from apps.journeys.models import ConversionPath
-from apps.channels.models import AdChannel
-from .engine import MODELS
-from .models import AttributionResult
-from .serializers import AttributionResultSerializer, RunAttributionSerializer
+from .models import AttributionResult, AttributionTask
+from .serializers import (
+    AttributionResultSerializer,
+    RunAttributionSerializer,
+    AttributionTaskSerializer,
+)
+from .tasks import acquire_or_get_existing_task, dispatch_attribution_task
 
 
 class RunAttributionView(APIView):
@@ -24,37 +28,64 @@ class RunAttributionView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        paths = ConversionPath.objects.prefetch_related('touchpoints').filter(converted=True)
-
+        params = {}
         if model_type == 'custom_weight':
-            weights = {
-                'first_touch': serializer.validated_data.get('first_touch_weight'),
-                'middle_touch': serializer.validated_data.get('middle_touch_weight'),
-                'last_touch': serializer.validated_data.get('last_touch_weight'),
-            }
-            credits = MODELS[model_type](paths, weights=weights)
+            for key in ('first_touch_weight', 'middle_touch_weight', 'last_touch_weight'):
+                if key in serializer.validated_data:
+                    params[key] = serializer.validated_data[key]
+
+        task, is_new = acquire_or_get_existing_task(
+            user_id=request.user.pk,
+            model_type=model_type,
+            params_dict=params,
+        )
+
+        if is_new and task.status == AttributionTask.STATUS_PENDING:
+            dispatch_attribution_task(task.pk)
+
+        return Response(
+            {
+                'task_id': task.pk,
+                'status': task.status,
+                'is_new': is_new,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class AttributionTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = AttributionTaskSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        role = get_user_role(user)
+        qs = AttributionTask.objects.annotate(results_count=Count('results'))
+
+        if role == ROLE_ADMIN:
+            pass
+        elif role == ROLE_OPERATOR:
+            allowed = get_allowed_models(user)
+            if allowed is not None:
+                qs = qs.filter(model_type__in=allowed)
         else:
-            credits = MODELS[model_type](paths)
+            qs = qs.filter(created_by=user)
 
-        AttributionResult.objects.filter(model_type=model_type, created_by=request.user).delete()
+        model_type = self.request.query_params.get('model_type')
+        if model_type:
+            qs = qs.filter(model_type=model_type)
 
-        channel_ids = list(credits.keys())
-        channel_map = {ch.pk: ch for ch in AdChannel.objects.filter(pk__in=channel_ids)}
+        task_status = self.request.query_params.get('status')
+        if task_status:
+            qs = qs.filter(status=task_status)
 
-        result_objs = [
-            AttributionResult(
-                model_type=model_type,
-                channel=channel_map[channel_id],
-                credit=credit,
-                created_by=request.user,
-            )
-            for channel_id, credit in credits.items()
-            if channel_id in channel_map
-        ]
-        AttributionResult.objects.bulk_create(result_objs)
-        results = sorted(result_objs, key=lambda r: -r.credit)
+        return qs
 
-        return Response(AttributionResultSerializer(results, many=True).data, status=status.HTTP_200_OK)
+    @action(detail=True, methods=['get'], url_path='results')
+    def results(self, request, pk=None):
+        task = self.get_object()
+        results = task.results.select_related('channel').all()
+        serializer = AttributionResultSerializer(results, many=True)
+        return Response(serializer.data)
 
 
 class AttributionResultViewSet(viewsets.ReadOnlyModelViewSet):
@@ -77,4 +108,9 @@ class AttributionResultViewSet(viewsets.ReadOnlyModelViewSet):
         model_type = self.request.query_params.get('model_type')
         if model_type:
             qs = qs.filter(model_type=model_type)
+
+        task_id = self.request.query_params.get('task_id')
+        if task_id:
+            qs = qs.filter(task_id=task_id)
+
         return qs

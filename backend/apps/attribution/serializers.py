@@ -1,16 +1,18 @@
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
-from .models import AttributionResult
+from .models import AttributionResult, AttributionTask
 from apps.channels.serializers import AdChannelSerializer
 
 
 class AttributionResultSerializer(serializers.ModelSerializer):
     channel_detail = AdChannelSerializer(source='channel', read_only=True)
+    task_id = serializers.PrimaryKeyRelatedField(source='task', read_only=True)
 
     class Meta:
         model = AttributionResult
-        fields = ('id', 'model_type', 'channel', 'channel_detail', 'credit', 'calculated_at')
-        read_only_fields = ('id', 'calculated_at')
+        fields = ('id', 'model_type', 'channel', 'channel_detail', 'credit', 'calculated_at',
+                  'task_id', 'is_partial')
+        read_only_fields = ('id', 'calculated_at', 'task_id', 'is_partial')
 
 
 class RunAttributionSerializer(serializers.Serializer):
@@ -41,3 +43,44 @@ class RunAttributionSerializer(serializers.Serializer):
                     'Either all three weights must be provided, or none of them'
                 )
         return attrs
+
+
+class AttributionTaskSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    model_type_display = serializers.CharField(source='get_model_type_display', read_only=True)
+    params = serializers.SerializerMethodField()
+    results_count = serializers.IntegerField(read_only=True)
+    created_by_id = serializers.PrimaryKeyRelatedField(source='created_by', read_only=True)
+
+    class Meta:
+        model = AttributionTask
+        fields = (
+            'id',
+            'model_type',
+            'model_type_display',
+            'status',
+            'status_display',
+            'progress',
+            'total_paths',
+            'processed_paths',
+            'error_message',
+            'params',
+            'created_by_id',
+            'created_at',
+            'started_at',
+            'finished_at',
+            'results_count',
+        )
+        read_only_fields = fields
+
+    def get_params(self, obj):
+        return obj.params
+
+
+class TaskIdResponseSerializer(serializers.Serializer):
+    task_id = serializers.IntegerField()
+    status = serializers.CharField()
+    is_new = serializers.BooleanField(
+        help_text='True if a new task was created; False if an existing equivalent task was returned'
+    )
+
